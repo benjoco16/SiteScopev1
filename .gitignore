@@ -36,3 +36,6 @@ Thumbs.db
 # Misc
 package-lock.json
 yarn.lock
+
+# Important Credentials
+backend/.env

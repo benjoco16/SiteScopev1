@@ -26,22 +26,28 @@ app.get("/status", (req, res) => {
   res.json(monitoredSites);
 });
 
+
 // Check site
 async function checkSite(site) {
   try {
     const response = await fetch(site.url);
     const newStatus = response.ok ? "UP" : "DOWN";
-    if (site.status !== newStatus) {
+
+    if (site.status === "UNKNOWN" || site.status !== newStatus) {
       await handleStatusChange(site.url, newStatus); // 🔔 send email
     }
+
     site.status = newStatus;
+    site.last_checked = new Date().toISOString();
   } catch (err) {
-    if (site.status !== "DOWN") {
+    if (site.status === "UNKNOWN" || site.status !== "DOWN") {
       await handleStatusChange(site.url, "DOWN"); // 🔔 send email
     }
     site.status = "DOWN";
+    site.last_checked = new Date().toISOString();
   }
 }
+
 
 // Run check every 60s
 setInterval(() => {
