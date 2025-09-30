@@ -1,13 +1,16 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import MonitorForm from "./components/MonitorForm";
 import MonitorList from "./components/MonitorList";
+import { ensureNotifyPermission } from "./services/notifications";
 
 export default function App() {
   const [refreshKey, setRefreshKey] = useState(0);
 
-  const handleSiteAdded = () => {
-    setRefreshKey((prev) => prev + 1); // force list refresh
-  };
+  useEffect(() => {
+    ensureNotifyPermission();
+  }, []);
+
+  const handleSiteAdded = () => setRefreshKey((k) => k + 1);
 
   return (
     <div className="p-4">
