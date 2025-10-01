@@ -1,38 +1,90 @@
-// frontend/src/services/api.js
-const BASE = "http://localhost:4000";
+const BASE = import.meta.env?.VITE_API_BASE || "http://localhost:4000";
+
+function authHeaders() {
+  const token = localStorage.getItem("token");
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+// --- Auth ---
+export async function register(email, password) {
+  const res = await fetch(`${BASE}/auth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  if (!res.ok) throw new Error("register failed");
+  return res.json();
+}
+
+// services/api.js
+export async function login(email, password) {
+  const res = await fetch(`${BASE}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || body?.ok === false) {
+    const msg = body?.error || "login_failed";
+    throw new Error(msg);
+  }
+  return body; // { ok:true, data:{ token, user } }
+}
+
+
+// --- Sites (CRUD, all authed) ---
+export async function getSites() {
+  const res = await fetch(`${BASE}/sites`, { headers: { ...authHeaders() } });
+  if (!res.ok) throw new Error("getSites failed");
+  return res.json();
+}
 
 export async function addSite(url) {
-  const res = await fetch(`${BASE}/add`, {
+  const res = await fetch(`${BASE}/sites`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ url }),
   });
-  if (!res.ok) throw new Error("add failed");
-  return res.json(); // { message, url, status }
+  if (!res.ok) throw new Error("addSite failed");
+  return res.json();
 }
 
-export async function getStatus() {
-  const res = await fetch(`${BASE}/status`);
-  if (!res.ok) throw new Error("getStatus failed");
-  return res.json(); // array of sites
+export async function deleteSite(id) {
+  const res = await fetch(`${BASE}/sites/${id}`, {
+    method: "DELETE",
+    headers: { ...authHeaders() },
+  });
+  if (!res.ok) throw new Error("deleteSite failed");
+  return res.json();
 }
 
-export async function checkNow(url) {
+export async function checkNow(site_id) {
   const res = await fetch(`${BASE}/check-now`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url }),
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ site_id }),
   });
-  if (!res.ok) throw new Error("check-now failed");
+  if (!res.ok) throw new Error("checkNow failed");
+  return res.json();
+}
+
+// --- Logs per site ---
+export async function getLogs(id, limit = 50) {
+  const res = await fetch(`${BASE}/sites/${id}/logs?limit=${limit}`, {
+    headers: { ...authHeaders() },
+  });
+  if (!res.ok) throw new Error("getLogs failed");
   return res.json();
 }
 
 export async function testAlert(url, status) {
   const res = await fetch(`${BASE}/test-alert`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ url, status }),
   });
-  if (!res.ok) throw new Error("test-alert failed");
+  if (!res.ok) throw new Error("testAlert failed");
   return res.json();
 }
+
