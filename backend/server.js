@@ -3,9 +3,11 @@ import "dotenv/config";
 import express from "express";
 import fetch from "node-fetch";
 import cors from "cors";
-import { handleStatusChange } from "./alerts.js";
+import { handleStatusChange, transporter } from "./alerts.js";
+import crypto from "crypto";
 import { q } from "./db.js";
-import { requireAuth, signToken, verifyUser /*, createUser (optional)*/ } from "./auth.js";
+import bcrypt from "bcrypt";
+import { requireAuth, signToken, verifyUser, createUser } from "./auth.js";
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -135,6 +137,67 @@ app.post("/auth/login", async (req, res) => {
   }
 });
 
+// Logout
+app.post("/auth/logout", requireAuth, (req, res) => {
+  res.json({ ok: true, data: "Logged out successfully" });
+});
+
+
+// Forgot password (send reset link)
+app.post("/auth/forgot-password", async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.json(apiErr("Email required"));
+
+  const { rows } = await q("SELECT * FROM users WHERE email=$1", [email]);
+  if (!rows.length) return res.json(apiErr("Email not found"));
+
+  const token = crypto.randomBytes(32).toString("hex");
+  const expiresAt = new Date(Date.now() + 1000 * 60 * 30);
+  await q("INSERT INTO password_resets(user_id, token, expires_at) VALUES($1,$2,$3)",
+    [rows[0].id, token, expiresAt]);
+
+  const resetLink = `http://localhost:3000/reset-password?token=${token}`;
+
+  try {
+    await transporter.sendMail({
+      from: `"SiteScope" <${process.env.EMAIL_USER}>`,
+      to: email,
+      subject: "SiteScope Reset Password",
+      text: `Click to reset your password: ${resetLink}`,
+      html: `<p>Click below to reset your password:</p>
+            <a href="${resetLink}">${resetLink}</a>`,
+    });
+
+    return res.json(apiOk(true));
+  } catch (err) {
+    console.error("Email send failed:", err);
+    return res.json(apiErr("Failed to send email"));
+  }
+});
+
+
+// Reset password (apply new password)
+app.post("/auth/reset-password", async (req, res) => {
+  const { token, newPassword } = req.body;
+  if (!token || !newPassword) return res.json(apiErr("Invalid"));
+
+  const { rows } = await q(
+    "SELECT * FROM password_resets WHERE token=$1 AND expires_at > NOW()",
+    [token]
+  );
+  if (!rows.length) return res.json(apiErr("Expired/Invalid token"));
+
+  const hash = await bcrypt.hash(newPassword, 10);
+
+  await q("UPDATE users SET password_hash=$1 WHERE id=$2", [
+    hash,
+    rows[0].user_id,
+  ]);
+  await q("DELETE FROM password_resets WHERE token=$1", [token]);
+
+  return res.json(apiOk(true));
+});
+
 /* ----------------------- USER-SCOPED ROUTES ----------------------- */
 // Legacy kept but now auth-required + user-scoped
 
@@ -148,8 +211,19 @@ app.post("/add", requireAuth, async (req, res) => {
     if (!normalized) return res.status(400).json(apiErr("Invalid URL"));
 
     const site = await addSite({ url: normalized, user_id: req.user.id });
-    const result = await checkSite(site);
-    return res.json(apiOk({ message: "Site added and checked", url: site.url, ...result }));
+
+    // Run first check immediately
+    const result = await checkSite(normalized);
+
+    // Persist last_checked + status
+    await updateSiteStatus(site.id, result);
+
+    return res.json(apiOk({
+      id: site.id,
+      url: site.url,
+      status: result.status,
+      last_checked: result.last_checked
+    }));
   } catch (e) {
     console.error("ADD error:", e);
     return res.status(500).json(apiErr("add failed"));
@@ -170,11 +244,22 @@ app.get("/status", requireAuth, async (req, res) => {
 // Real-time check for a specific site you own
 app.post("/check-now", requireAuth, async (req, res) => {
   try {
-    const { url } = req.body || {};
-    if (!url) return res.status(400).json(apiErr("url required"));
+    const { url, site_id } = req.body || {};
+    if (!url && !site_id) return res.status(400).json(apiErr("url or site_id required"));
 
-    const normalized = normalizeUrl(url) || url;
-    const site = await getSiteByUrlForUser(req.user.id, normalized);
+    let site = null;
+
+    if (site_id) {
+      const { rows } = await q(
+        `SELECT * FROM sites WHERE id=$1 AND user_id=$2`,
+        [Number(site_id), req.user.id]
+      );
+      site = rows[0] || null;
+    } else {
+      const normalized = normalizeUrl(url) || url;
+      site = await getSiteByUrlForUser(req.user.id, normalized);
+    }
+
     if (!site) return res.status(404).json(apiErr("site not found"));
 
     const result = await checkSite(site);
@@ -184,6 +269,7 @@ app.post("/check-now", requireAuth, async (req, res) => {
     return res.status(500).json(apiErr(e?.message || "check-now failed"));
   }
 });
+
 
 /* ----------------------- NEW: /sites CRUD ----------------------- */
 // GET /sites → list my sites (same as /status)
@@ -234,15 +320,25 @@ app.put("/sites/:id", requireAuth, async (req, res) => {
   }
 });
 
-// DELETE /sites/:id → remove site + logs (cascade)
+// Delete site by ID (must belong to user)
 app.delete("/sites/:id", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
-    const del = await q(`DELETE FROM sites WHERE id=$1 AND user_id=$2 RETURNING id`, [id, req.user.id]);
-    if (!del.rows.length) return res.status(404).json(apiErr("Not found"));
-    return res.json(apiOk({ id: Number(id), deleted: true }));
-  } catch (e) {
-    return res.status(500).json(apiErr("delete failed"));
+    const userId = req.user.id;
+
+    const result = await q(
+      "DELETE FROM sites WHERE id = $1 AND user_id = $2 RETURNING *",
+      [id, userId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ ok: false, error: "Not found" });
+    }
+
+    res.json({ ok: true, data: result.rows[0] });
+  } catch (err) {
+    console.error("Delete site failed:", err);
+    res.status(500).json({ ok: false, error: "Server error" });
   }
 });
 
@@ -283,34 +379,31 @@ app.post("/auth/register", async (req, res) => {
     if (!email || !password) {
       return res.status(400).json({ ok: false, error: "email_and_password_required" });
     }
-    const user = await createUser(email, password); // from utils.js
-    if (!user) {
-      return res.status(409).json({ ok: false, error: "email_exists" });
-    }
+    const user = await createUser(email, password); // always returns a row
     const token = signToken({ id: user.id, email: user.email });
     return res.json({ ok: true, data: { token, user: { id: user.id, email: user.email } } });
   } catch (e) {
-    console.error(e);
+    console.error("register_failed", e);
     return res.status(500).json({ ok: false, error: "register_failed" });
   }
 });
 
-app.get("/sites/:id/logs", authMiddleware, async (req, res) => {
+app.get("/sites/:id/logs", requireAuth, async (req, res) => {
   try {
     const siteId = Number(req.params.id || 0);
     const limit = Math.min(Number(req.query.limit || 50), 200);
-    if (!siteId) return res.status(400).json({ ok: false, error: "invalid_site_id" });
+    if (!siteId) return res.status(400).json(apiErr("invalid_site_id"));
 
-    // Ensure the site belongs to this user
-    const { rows: srows } = await pool.query(
+    // ensure site belongs to current user
+    const { rows: srows } = await q(
       `SELECT id FROM sites WHERE id=$1 AND user_id=$2`,
-      [siteId, req.user.uid]
+      [siteId, req.user.id]
     );
-    if (srows.length === 0) {
-      return res.status(404).json({ ok: false, error: "site_not_found" });
+    if (!srows.length) {
+      return res.status(404).json(apiErr("site_not_found"));
     }
 
-    const { rows } = await pool.query(
+    const { rows } = await q(
       `SELECT status, code, ms, checked_at
          FROM site_logs
         WHERE site_id=$1
@@ -318,9 +411,9 @@ app.get("/sites/:id/logs", authMiddleware, async (req, res) => {
         LIMIT $2`,
       [siteId, limit]
     );
-    return res.json({ ok: true, data: rows });
+    return res.json(apiOk(rows));
   } catch (e) {
-    console.error(e);
-    return res.status(500).json({ ok: false, error: "logs_fetch_failed" });
+    console.error("LOGS error:", e);
+    return res.status(500).json(apiErr("logs_fetch_failed"));
   }
 });

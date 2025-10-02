@@ -14,8 +14,12 @@ export default function MonitorList() {
   useEffect(() => { loadSites(); }, []);
 
   async function handleDelete(id) {
-    await deleteSite(id);
-    setSites(sites.filter(s => s.id !== id));
+    const res = await deleteSite(id);
+    if (res.ok) {
+      setSites(sites.filter((s) => s.id !== id));
+    } else {
+      alert(res.error || "Delete failed");
+    }
   }
   async function handleCheckNow(id) {
     setBusyId(id);
