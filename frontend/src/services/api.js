@@ -12,8 +12,11 @@ export async function register(email, password) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password }),
   });
-  if (!res.ok) throw new Error("register failed");
-  return res.json();
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || body?.ok === false) {
+    throw new Error(body?.error || "register_failed");
+  }
+  return body; // { ok:true, data:{ token, user } }
 }
 
 // services/api.js
@@ -53,9 +56,11 @@ export async function addSite(url) {
 export async function deleteSite(id) {
   const res = await fetch(`${BASE}/sites/${id}`, {
     method: "DELETE",
-    headers: { ...authHeaders() },
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${localStorage.getItem("token")}`,
+    },
   });
-  if (!res.ok) throw new Error("deleteSite failed");
   return res.json();
 }
 
@@ -88,3 +93,24 @@ export async function testAlert(url, status) {
   return res.json();
 }
 
+export function logout() {
+  localStorage.removeItem("token");
+}
+
+export async function forgotPassword(email) {
+  const res = await fetch(`${BASE}/auth/forgot-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  return res.json();
+}
+
+export async function resetPassword(token, newPassword) {
+  const res = await fetch(`${BASE}/auth/reset-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token, newPassword }),
+  });
+  return res.json();
+}

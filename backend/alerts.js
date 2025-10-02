@@ -2,7 +2,7 @@
 import nodemailer from "nodemailer";
 
 // ---- SMTP transport (your cPanel settings) ----
-const transporter = nodemailer.createTransport({
+export const transporter = nodemailer.createTransport({
   host: "cp-wc35.syd02.ds.network",
   port: 465,
   secure: true,
