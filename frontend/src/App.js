@@ -1,49 +1,91 @@
-import { useState } from "react";
+import { BrowserRouter, Routes, Route, useNavigate } from "react-router-dom";
+import { requestPermissionAndToken, onForegroundMessage } from "./firebase";
+import { api } from "./services/api";
+import ProtectedRoute from "./context/ProtectedRoute";
+import { AuthProvider } from "./context/AuthContext";
+import Login from "./pages/Login";
+import Register from "./pages/Register";
+import ForgotPassword from "./pages/ForgotPassword";
+import ResetPassword from "./pages/ResetPassword";
+import MonitorForm from "./components/MonitorForm";
+import MonitorList from "./components/MonitorList";
+import { useEffect, useState } from "react";
+import { logout } from "./services/api";
 
-function App() {
-  const [url, setUrl] = useState("");
-  const [result, setResult] = useState(null);
+async function registerPushTokenOnce() {
+  const already = localStorage.getItem("push_registered_v1");
+  const jwt = localStorage.getItem("token");
+  if (!jwt) return; // only register for logged-in users
 
-  const handlePing = async () => {
-    try {
-      const res = await fetch("http://localhost:4000/ping", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url }),
-      });
-      const data = await res.json();
-      setResult(data);
-    } catch (err) {
-      setResult({ status: "error", message: err.message });
-    }
+  // you can skip this guard if your backend uses ON CONFLICT on token
+  if (already) return;
+
+  const token = await requestPermissionAndToken();
+  if (token) {
+    await api("/save-token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token }),
+    });
+    localStorage.setItem("push_registered_v1", "1");
+  }
+}
+
+function Dashboard() {
+  const [bump, setBump] = useState(0);
+  const navigate = useNavigate();
+
+  const handleLogout = () => {
+    logout();              // remove token from localStorage
+    localStorage.removeItem("push_registered_v1"); // so next login re-registers
+    navigate("/login");    // redirect to login
   };
 
   return (
-    <div style={{ padding: "2rem", fontFamily: "Arial" }}>
-      <h1>SiteScope - Ping Test</h1>
-      <input
-        type="text"
-        placeholder="Enter URL (e.g. https://google.com)"
-        value={url}
-        onChange={(e) => setUrl(e.target.value)}
-        style={{ padding: "0.5rem", width: "300px" }}
-      />
-      <button
-        onClick={handlePing}
-        style={{ marginLeft: "1rem", padding: "0.5rem 1rem" }}
-      >
-        Ping
-      </button>
-
-      {result && (
-        <div style={{ marginTop: "1rem" }}>
-          <strong>Status:</strong> {result.status}{" "}
-          {result.code && `(HTTP ${result.code})`}
-          {result.error && <p>Error: {result.error}</p>}
-        </div>
-      )}
+    <div className="max-w-3xl mx-auto p-4">
+      <div className="flex justify-between items-center mb-4">
+        <h1 className="text-2xl">SiteScope</h1>
+        <button
+          onClick={handleLogout}
+          className="bg-red-500 px-3 py-1 rounded hover:bg-red-600"
+        >
+          Logout
+        </button>
+      </div>
+      <MonitorForm onSiteAdded={() => setBump(v => v + 1)} />
+      <MonitorList key={bump}/>
     </div>
   );
 }
 
-export default App;
+export default function App() {
+  useEffect(() => {
+    // run on every app load for users with persisted sessions
+    registerPushTokenOnce();
+   // optional: handle messages while the app is open
+   onForegroundMessage((p) => {
+      console.log("Foreground push:", p);
+      // TODO: show a toast if you want
+    });
+  }, []);
+  return (
+    <AuthProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="/register" element={<Register />} />
+          <Route path="/forgot-password" element={<ForgotPassword />} />
+          <Route path="/reset-password" element={<ResetPassword />} />
+          <Route
+            path="/"
+            element={
+              <ProtectedRoute>
+                <Dashboard />
+              </ProtectedRoute>
+            }
+          />
+        </Routes>
+      </BrowserRouter>
+    </AuthProvider>
+  );
+}
