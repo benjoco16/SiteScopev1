@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { useAuth } from "../context/AuthContext";
 import { Link, useNavigate } from "react-router-dom";
+import { requestPermissionAndToken } from "../firebase";
+import { api } from "../services/api";
 
 export default function Login() {
   const nav = useNavigate();
@@ -9,10 +11,23 @@ export default function Login() {
   const [password, setPassword] = useState("");
   const [err, setErr] = useState("");
 
+  async function registerAfterLogin() {
+  const token = await requestPermissionAndToken();
+  if (token) {
+      await api("/save-token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
+      localStorage.setItem("push_registered_v1", "1");
+    }
+  }
+
   async function handleSubmit(e) {
     e.preventDefault();
     try {
       await login(email, password);
+      await registerAfterLogin();
       nav("/");
     } catch (e) {
       setErr(e?.message || "Login failed");

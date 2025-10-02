@@ -1,5 +1,6 @@
 // backend/alerts.js
 import nodemailer from "nodemailer";
+import { fcm } from "./firebaseAdmin.js";
 
 // ---- SMTP transport (your cPanel settings) ----
 export const transporter = nodemailer.createTransport({
@@ -55,5 +56,17 @@ export async function handleStatusChange(url, currentStatus, opts = {}) {
       lastNotifiedAt.set(url, now);
     }
     lastStatus.set(url, currentStatus);
+  }
+}
+
+export async function sendPushFCM(token, title, body) {
+  try {
+    await fcm.send({
+      token,
+      notification: { title, body },
+    });
+    console.log("Push sent:", title);
+  } catch (err) {
+    console.error("Push error:", err);
   }
 }

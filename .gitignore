@@ -7,6 +7,7 @@ yarn-error.log*
 # Dependency directories
 backend/node_modules/
 frontend/node_modules/
+backend/serviceAccountKey.json
 
 # Build outputs
 frontend/build/

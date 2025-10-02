@@ -81,9 +81,26 @@ async function addSite({ url, user_id }) {
 }
 
 async function persistStatus(siteId, newStatus) {
-  await q(`UPDATE sites SET status=$1, last_checked=NOW() WHERE id=$2`, [newStatus, siteId]);
-  await q(`INSERT INTO site_logs (site_id, status, checked_at) VALUES ($1, $2, NOW())`, [siteId, newStatus]);
+  // site may have been deleted between fetch and persist — ignore if so
+  const exists = await q("SELECT 1 FROM sites WHERE id=$1", [siteId]);
+  if (exists.rowCount === 0) return;
+
+  await q(
+    `UPDATE sites
+       SET status=$1,
+           last_checked=NOW()
+     WHERE id=$2`,
+    [newStatus, siteId]
+  );
+
+  await q(
+    `INSERT INTO site_logs (site_id, status, checked_at)
+     VALUES ($1, $2, NOW())`,
+    [siteId, newStatus]
+  );
 }
+
+
 
 async function checkSite(site) {
   const controller = new AbortController();
@@ -93,7 +110,7 @@ async function checkSite(site) {
   let httpCode = 0;
 
   try {
-    const resp = await fetch(site.url, { signal: controller.signal /*, method: "HEAD" */ });
+    const resp = await fetch(site.url, { signal: controller.signal });
     httpCode = resp.status;
     newStatus = resp.ok ? "UP" : "DOWN";
   } catch {
@@ -103,19 +120,15 @@ async function checkSite(site) {
     clearTimeout(timeout);
   }
 
-  // fire alert on flip (including UNKNOWN -> *)
   if (site.status === "UNKNOWN" || site.status !== newStatus) {
-    try {
-      await handleStatusChange(site.url, newStatus);
-    } catch (e) {
-      console.error("alert error:", e);
-    }
+    try { await handleStatusChange(site.url, newStatus); }
+    catch (e) { console.error("alert error:", e); }
   }
 
-  // persist status + log
   await persistStatus(site.id, newStatus);
   return { status: newStatus, http_code: httpCode };
 }
+
 
 /* ----------------------- AUTH ROUTES ----------------------- */
 // (Signup route optional; keeping minimal per your ask)
@@ -212,23 +225,21 @@ app.post("/add", requireAuth, async (req, res) => {
 
     const site = await addSite({ url: normalized, user_id: req.user.id });
 
-    // Run first check immediately
-    const result = await checkSite(normalized);
-
-    // Persist last_checked + status
-    await updateSiteStatus(site.id, result);
+    // run first check; checkSite will persist status + log
+    const result = await checkSite(site);
 
     return res.json(apiOk({
       id: site.id,
       url: site.url,
       status: result.status,
-      last_checked: result.last_checked
+      last_checked: new Date().toISOString()
     }));
   } catch (e) {
     console.error("ADD error:", e);
     return res.status(500).json(apiErr("add failed"));
   }
 });
+
 
 // List your sites
 app.get("/status", requireAuth, async (req, res) => {
@@ -388,32 +399,48 @@ app.post("/auth/register", async (req, res) => {
   }
 });
 
+// REPLACE the whole handler with this
 app.get("/sites/:id/logs", requireAuth, async (req, res) => {
   try {
     const siteId = Number(req.params.id || 0);
-    const limit = Math.min(Number(req.query.limit || 50), 200);
-    if (!siteId) return res.status(400).json(apiErr("invalid_site_id"));
+    if (!Number.isInteger(siteId) || siteId <= 0) {
+      return res.status(400).json(apiErr("invalid_site_id"));
+    }
+    const limit = Math.max(1, Math.min(200, Number(req.query.limit || 50)));
 
-    // ensure site belongs to current user
     const { rows: srows } = await q(
-      `SELECT id FROM sites WHERE id=$1 AND user_id=$2`,
+      "SELECT id FROM sites WHERE id=$1 AND user_id=$2",
       [siteId, req.user.id]
     );
-    if (!srows.length) {
-      return res.status(404).json(apiErr("site_not_found"));
-    }
+    if (!srows.length) return res.status(404).json(apiErr("site_not_found"));
 
     const { rows } = await q(
-      `SELECT status, code, ms, checked_at
-         FROM site_logs
-        WHERE site_id=$1
-        ORDER BY checked_at DESC
-        LIMIT $2`,
-      [siteId, limit]
+      `
+      SELECT status, checked_at
+      FROM site_logs
+      WHERE site_id=$1
+      ORDER BY checked_at DESC
+      LIMIT ${limit};
+      `,
+      [siteId]
     );
-    return res.json(apiOk(rows));
+    res.json(apiOk(rows));
   } catch (e) {
     console.error("LOGS error:", e);
-    return res.status(500).json(apiErr("logs_fetch_failed"));
+    res.status(500).json(apiErr("logs_fetch_failed"));
   }
+});
+
+
+//Firebase Admin SDK for FCM
+app.post("/save-token", requireAuth, async (req, res) => {
+  const { token } = req.body;
+  if (!token) return res.status(400).json({ ok: false, error: "No token" });
+
+  await q(
+    "INSERT INTO user_tokens (user_id, token) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+    [req.user.id, token]
+  );
+
+  res.json({ ok: true });
 });
