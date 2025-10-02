@@ -1,4 +1,7 @@
-const BASE = import.meta.env?.VITE_API_BASE || "http://localhost:4000";
+
+const BASE = process.env.REACT_APP_API_BASE || "http://localhost:4000";
+console.log("[api] BASE =", BASE);   // <- will print on page load
+
 
 function authHeaders() {
   const token = localStorage.getItem("token");
@@ -76,12 +79,16 @@ export async function checkNow(site_id) {
 
 // --- Logs per site ---
 export async function getLogs(id, limit = 50) {
-  const res = await fetch(`${BASE}/sites/${id}/logs?limit=${limit}`, {
-    headers: { ...authHeaders() },
+  const cleanId = String(id).replace(/^\/+/, ""); // strip any leading slash
+  const res = await fetch(`${BASE}/sites/${cleanId}/logs?limit=${limit}`, {
+    headers: { "Content-Type": "application/json", ...authHeaders() },
   });
-  if (!res.ok) throw new Error("getLogs failed");
-  return res.json();
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || body?.ok === false) throw new Error("getLogs failed");
+  return body;
 }
+
+
 
 export async function testAlert(url, status) {
   const res = await fetch(`${BASE}/test-alert`, {
@@ -113,4 +120,26 @@ export async function resetPassword(token, newPassword) {
     body: JSON.stringify({ token, newPassword }),
   });
   return res.json();
+}
+
+// ensure your api wrapper adds Authorization from localStorage
+// Core fetch wrapper
+export async function api(path, opts = {}) {
+  const token = localStorage.getItem("token");
+  const res = await fetch(`${BASE}${path}`, {
+    method: opts.method || "GET",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(opts.headers || {}),
+    },
+    ...(opts.body ? { body: opts.body } : {}),
+  });
+
+  // Throw on non-2xx so callers can catch
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(text || `HTTP ${res.status}`);
+  }
+  return await res.json().catch(() => ({}));
 }
