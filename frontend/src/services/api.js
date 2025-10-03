@@ -46,11 +46,11 @@ export async function getSites() {
   return res.json();
 }
 
-export async function addSite(url) {
+export async function addSite(url, alertEmails = []) {
   const res = await fetch(`${BASE}/sites`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ url }),
+    body: JSON.stringify({ url, alert_emails: alertEmails }),
   });
   if (!res.ok) throw new Error("addSite failed");
   return res.json();
@@ -155,6 +155,15 @@ export async function updateProfile(data) {
     method: "PUT",
     headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(data),
+  });
+  return res.json();
+}
+
+export async function testNotification(type = "email") {
+  const res = await fetch(`${BASE}/test-notification`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ type }),
   });
   return res.json();
 }

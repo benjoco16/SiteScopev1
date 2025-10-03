@@ -11,6 +11,8 @@ import ProfilePage from "./pages/ProfilePage";      // ✅ added
 import EditProfilePage from "./pages/EditProfilePage"; 
 import MonitorForm from "./components/MonitorForm";
 import MonitorList from "./components/MonitorList";
+import NotificationTest from "./components/NotificationTest";
+import DashboardLayout from "./components/layout/DashboardLayout";
 import { useEffect, useState } from "react";
 import { logout } from "./services/api";
 
@@ -43,27 +45,15 @@ function Dashboard() {
     navigate("/login");    // redirect to login
   };
 
-  return (
-    <div className="max-w-3xl mx-auto p-4">
-      <div className="flex justify-between items-center mb-4">
-        <h1 className="text-2xl">SiteScope</h1>
-        <button
-            onClick={() => navigate("/profile")}
-            className="px-3 py-1 border rounded"
-          >
-            Profile
-          </button>
-        <button
-          onClick={handleLogout}
-          className="bg-red-500 px-3 py-1 rounded hover:bg-red-600"
-        >
-          Logout
-        </button>
-      </div>
-      <MonitorForm onSiteAdded={() => setBump(v => v + 1)} />
-      <MonitorList key={bump}/>
-    </div>
-  );
+      return (
+        <DashboardLayout onLogout={handleLogout}>
+          <div className="space-y-6">
+            <MonitorForm onSiteAdded={() => setBump(v => v + 1)} />
+            <NotificationTest />
+            <MonitorList key={bump}/>
+          </div>
+        </DashboardLayout>
+      );
 }
 
 export default function App() {
@@ -72,9 +62,12 @@ export default function App() {
     registerPushTokenOnce();
    // optional: handle messages while the app is open
    onForegroundMessage((p) => {
-      console.log("Foreground push:", p);
-      // TODO: show a toast if you want
+    console.log("Foreground push:", p);
+      if (Notification.permission === "granted") {
+        new Notification(p.notification.title, { body: p.notification.body });
+      }
     });
+
   }, []);
   return (
     <AuthProvider>

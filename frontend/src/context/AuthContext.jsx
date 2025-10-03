@@ -7,8 +7,14 @@ const AuthContext = createContext(null);
 export function AuthProvider({ children }) {
   const [token, setToken] = useState(() => localStorage.getItem("token"));
   const [user, setUser] = useState(() => {
-    const raw = localStorage.getItem("user");
-    return raw ? JSON.parse(raw) : null;
+    try {
+      const raw = localStorage.getItem("user");
+      // if localStorage contains "undefined" or empty, skip parsing
+      return raw && raw !== "undefined" ? JSON.parse(raw) : null;
+    } catch {
+      // fallback if JSON.parse fails
+      return null;
+    }
   });
 
   function saveAuth(t, u) {
@@ -19,13 +25,15 @@ export function AuthProvider({ children }) {
   }
 
   async function login(email, password) {
-    const { data } = await apiLogin(email, password);
-    saveAuth(data.token, data.user);
+    const res = await apiLogin(email, password);
+    const { token, user } = res.data || res;   // support both shapes
+    saveAuth(token, user);
   }
 
   async function register(email, password) {
-    const { data } = await apiRegister(email, password);
-    saveAuth(data.token, data.user);
+    const res = await apiRegister(email, password);
+    const { token, user } = res.data || res;
+    saveAuth(token, user);
   }
 
   function logout() {
@@ -40,8 +48,10 @@ export function AuthProvider({ children }) {
       {children}
     </AuthContext.Provider>
   );
+  
 }
 
 export function useAuth() {
   return useContext(AuthContext);
 }
+

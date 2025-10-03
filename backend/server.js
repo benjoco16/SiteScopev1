@@ -3,23 +3,91 @@ import "dotenv/config";
 import express from "express";
 import fetch from "node-fetch";
 import cors from "cors";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 import { handleStatusChange, transporter } from "./alerts.js";
+import { fcm, sendPushNotification } from "./firebaseAdmin.js";
 import crypto from "crypto";
 import { q } from "./db.js";
 import bcrypt from "bcrypt";
 import { requireAuth, signToken, verifyUser, createUser } from "./auth.js";
 import authRoutes from "./routes/auth.js";
 import profileRoutes from "./routes/profile.js";
+import userRoutes from "./routes/users.js";
+
+// Environment validation - CRITICAL SECURITY
+const requiredEnvVars = [
+  'JWT_SECRET',
+  'DB_HOST', 
+  'DB_NAME',
+  'DB_USER',
+  'DB_PASS',
+  'EMAIL_USER',
+  'EMAIL_PASS'
+];
+
+const missingVars = requiredEnvVars.filter(envVar => !process.env[envVar]);
+if (missingVars.length > 0) {
+  console.error('❌ CRITICAL: Missing required environment variables:');
+  missingVars.forEach(envVar => console.error(`   - ${envVar}`));
+  console.error('\n💡 Create a .env file with these variables before starting the server.');
+  process.exit(1);
+}
+
+// Validate JWT_SECRET is not the default
+if (process.env.JWT_SECRET === 'dev_secret_change_me') {
+  console.error('❌ CRITICAL: JWT_SECRET is still using the default value!');
+  console.error('💡 Set a strong, unique JWT_SECRET in your .env file.');
+  process.exit(1);
+}
+
+console.log('✅ Environment validation passed');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
 
-app.use(cors());
-app.use(express.json());
+// Security middleware - CRITICAL
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'"],
+      imgSrc: ["'self'", "data:", "https:"],
+    },
+  },
+  crossOriginEmbedderPolicy: false
+}));
+
+// Rate limiting - 100 requests per 15 minutes per IP
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: {
+    ok: false,
+    error: 'Too many requests from this IP, please try again later.'
+  },
+  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+});
+app.use(limiter);
+
+// CORS configuration - restricted origins
+const corsOptions = {
+  origin: process.env.NODE_ENV === 'production' 
+    ? [process.env.FRONTEND_URL] // Will be set to your production domain
+    : ['http://localhost:3000'], // Development only
+  credentials: true,
+  optionsSuccessStatus: 200
+};
+app.use(cors(corsOptions));
+
+app.use(express.json({ limit: '10mb' })); // Limit request size
 
 // Route groups
 app.use("/auth", authRoutes);
 app.use("/auth", profileRoutes); // keep profile under /auth
+app.use("/users", userRoutes);
 
 /* ----------------------- response helpers ----------------------- */
 const apiOk  = (data) => ({ ok: true,  data, error: null });
@@ -71,13 +139,13 @@ async function getSiteByUrlForUser(userId, url) {
   return rows[0] || null;
 }
 
-async function addSite({ url, user_id }) {
+async function addSite({ url, user_id, alert_emails = [] }) {
   const { rows } = await q(
-    `INSERT INTO sites (user_id, url, status)
-       VALUES ($1, $2, 'UNKNOWN')
-     ON CONFLICT (user_id, url) DO NOTHING
+    `INSERT INTO sites (user_id, url, status, alert_emails)
+       VALUES ($1, $2, 'UNKNOWN', $3)
+     ON CONFLICT (user_id, url) DO UPDATE SET alert_emails = EXCLUDED.alert_emails
      RETURNING *`,
-    [user_id, url]
+    [user_id, url, alert_emails]
   );
   if (!rows.length) {
     const existing = await getSiteByUrlForUser(user_id, url);
@@ -127,7 +195,7 @@ async function checkSite(site) {
   }
 
   if (site.status === "UNKNOWN" || site.status !== newStatus) {
-    try { await handleStatusChange(site.url, newStatus); }
+    try { await handleStatusChange(site.user_id, site.url, newStatus); }    
     catch (e) { console.error("alert error:", e); }
   }
 
@@ -302,34 +370,75 @@ app.get("/sites", requireAuth, async (req, res) => {
 // POST /sites → add a site (same as /add)
 app.post("/sites", requireAuth, async (req, res) => {
   try {
-    const { url } = req.body || {};
+    const { url, alert_emails = [] } = req.body || {};
     const normalized = normalizeUrl(url);
     if (!normalized) return res.status(400).json(apiErr("Invalid URL"));
-    const site = await addSite({ url: normalized, user_id: req.user.id });
+    
+    // Validate alert emails
+    const validEmails = Array.isArray(alert_emails) 
+      ? alert_emails.filter(email => email && email.trim() && email.includes('@'))
+      : [];
+    
+    const site = await addSite({ 
+      url: normalized, 
+      user_id: req.user.id, 
+      alert_emails: validEmails 
+    });
     return res.json(apiOk(site));
   } catch (e) {
     return res.status(500).json(apiErr("create failed"));
   }
 });
 
-// PUT /sites/:id → update URL (re-normalize, dedupe per user)
+// PUT /sites/:id → update URL and alert emails
 app.put("/sites/:id", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
-    const { url } = req.body || {};
-    const normalized = normalizeUrl(url);
-    if (!normalized) return res.status(400).json(apiErr("Invalid URL"));
+    const { url, alert_emails = [] } = req.body || {};
+    
+    let updateFields = [];
+    let updateValues = [];
+    let paramCount = 1;
 
-    // if another site with same URL exists for this user, block
-    const dupe = await getSiteByUrlForUser(req.user.id, normalized);
-    if (dupe && String(dupe.id) !== String(id)) {
-      return res.status(409).json(apiErr("Duplicate URL for this user"));
+    // Handle URL update
+    if (url) {
+      const normalized = normalizeUrl(url);
+      if (!normalized) return res.status(400).json(apiErr("Invalid URL"));
+
+      // Check for duplicate URL
+      const dupe = await getSiteByUrlForUser(req.user.id, normalized);
+      if (dupe && String(dupe.id) !== String(id)) {
+        return res.status(409).json(apiErr("Duplicate URL for this user"));
+      }
+
+      updateFields.push(`url = $${paramCount}`);
+      updateValues.push(normalized);
+      paramCount++;
     }
 
+    // Handle alert emails update
+    if (alert_emails !== undefined) {
+      const validEmails = Array.isArray(alert_emails) 
+        ? alert_emails.filter(email => email && email.trim() && email.includes('@'))
+        : [];
+      
+      updateFields.push(`alert_emails = $${paramCount}`);
+      updateValues.push(validEmails);
+      paramCount++;
+    }
+
+    if (updateFields.length === 0) {
+      return res.status(400).json(apiErr("No fields to update"));
+    }
+
+    // Add WHERE clause parameters
+    updateValues.push(id, req.user.id);
+
     const upd = await q(
-      `UPDATE sites SET url=$1 WHERE id=$2 AND user_id=$3 RETURNING *`,
-      [normalized, id, req.user.id]
+      `UPDATE sites SET ${updateFields.join(', ')} WHERE id=$${paramCount} AND user_id=$${paramCount + 1} RETURNING *`,
+      updateValues
     );
+    
     if (!upd.rows.length) return res.status(404).json(apiErr("Not found"));
     return res.json(apiOk(upd.rows[0]));
   } catch (e) {
@@ -361,11 +470,11 @@ app.delete("/sites/:id", requireAuth, async (req, res) => {
 
 /* ----------------------- test-alert (optional) ----------------------- */
 // You can keep it open or require auth; here we keep it open for your UI button.
-app.post("/test-alert", async (req, res) => {
+app.post("/test-alert", requireAuth, async (req, res) => {
   const { url, status } = req.body || {};
   if (!url || !status) return res.status(400).json(apiErr("url and status required"));
   try {
-    await handleStatusChange(url, status, { force: true });
+    await handleStatusChange(req.user.id, url, status, { force: true });
     return res.json(apiOk(true));
   } catch (e) {
     console.error("TEST-ALERT error:", e);
@@ -373,17 +482,206 @@ app.post("/test-alert", async (req, res) => {
   }
 });
 
-/* ----------------------- sweep loop ----------------------- */
-setInterval(async () => {
+// Test notification endpoint
+app.post("/test-notification", requireAuth, async (req, res) => {
+  try {
+    const { type = "email" } = req.body || {};
+    
+    if (type === "email") {
+      // Send test email
+      await handleStatusChange(req.user.id, "https://example.com", "DOWN", { force: true });
+      return res.json(apiOk({ message: "Test email notification sent" }));
+    } else if (type === "push") {
+      // Send test push notification
+      const { rows: tokenRows } = await q("SELECT token FROM user_tokens WHERE user_id=$1", [req.user.id]);
+      if (tokenRows.length === 0) {
+        return res.status(400).json(apiErr("No push notification tokens found"));
+      }
+      
+      for (const row of tokenRows) {
+        try {
+          const result = await sendPushNotification(
+            row.token,
+            "SiteScope Test Notification",
+            "This is a test notification from SiteScope",
+            {
+              type: 'test_notification',
+              timestamp: Date.now().toString()
+            }
+          );
+          
+          if (result.success) {
+            console.log(`✅ Test push notification sent successfully`);
+          } else if (result.shouldRemove) {
+            // Remove invalid token
+            await q("DELETE FROM user_tokens WHERE token=$1", [row.token]);
+            console.log(`🗑️ Removed invalid token during test`);
+          } else {
+            console.error(`❌ Test push notification failed:`, result.error);
+          }
+        } catch (err) {
+          console.error("Push test error:", err);
+        }
+      }
+      
+      return res.json(apiOk({ message: "Test push notification sent" }));
+    }
+    
+    return res.status(400).json(apiErr("Invalid notification type"));
+  } catch (e) {
+    console.error("TEST-NOTIFICATION error:", e);
+    return res.status(500).json(apiErr(e?.message || "test-notification failed"));
+  }
+});
+
+// Save FCM token endpoint
+app.post("/save-token", requireAuth, async (req, res) => {
+  try {
+    const { token } = req.body || {};
+    const userId = req.user.id;
+
+    if (!token) {
+      return res.status(400).json(apiErr("Token is required"));
+    }
+
+    // Insert or update the token
+    await q(
+      `INSERT INTO user_tokens (user_id, token) 
+       VALUES ($1, $2) 
+       ON CONFLICT (token) DO UPDATE SET user_id = EXCLUDED.user_id`,
+      [userId, token]
+    );
+
+    console.log(`✅ FCM token saved for user ${userId}`);
+    return res.json(apiOk({ message: "Token saved successfully" }));
+  } catch (e) {
+    console.error("Save token error:", e);
+    return res.status(500).json(apiErr("Failed to save token"));
+  }
+});
+
+// Profile update endpoint
+app.put("/auth/update", requireAuth, async (req, res) => {
+  try {
+    const { username, image_url, contact_number, plan, alert_emails } = req.body || {};
+    const userId = req.user.id;
+
+    // Build update query dynamically
+    const updateFields = [];
+    const updateValues = [];
+    let paramCount = 1;
+
+    if (username !== undefined) {
+      updateFields.push(`username = $${paramCount}`);
+      updateValues.push(username);
+      paramCount++;
+    }
+
+    if (image_url !== undefined) {
+      updateFields.push(`image_url = $${paramCount}`);
+      updateValues.push(image_url);
+      paramCount++;
+    }
+
+    if (contact_number !== undefined) {
+      updateFields.push(`contact_number = $${paramCount}`);
+      updateValues.push(contact_number);
+      paramCount++;
+    }
+
+    if (plan !== undefined) {
+      updateFields.push(`plan = $${paramCount}`);
+      updateValues.push(plan);
+      paramCount++;
+    }
+
+    if (alert_emails !== undefined) {
+      // Validate alert emails
+      const validEmails = Array.isArray(alert_emails)
+        ? alert_emails.filter(email => email && email.trim() && email.includes('@'))
+        : [];
+
+      updateFields.push(`alert_emails = $${paramCount}::jsonb`);
+      updateValues.push(JSON.stringify(validEmails));
+      paramCount++;
+    }
+
+    if (updateFields.length === 0) {
+      return res.status(400).json(apiErr("No fields to update"));
+    }
+
+    // Add WHERE clause parameter
+    updateValues.push(userId);
+
+    const result = await q(
+      `UPDATE users SET ${updateFields.join(', ')} WHERE id = $${paramCount} RETURNING *`,
+      updateValues
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json(apiErr("User not found"));
+    }
+
+    return res.json(apiOk(result.rows[0]));
+  } catch (e) {
+    console.error("Profile update error:", e);
+    return res.status(500).json(apiErr("Profile update failed"));
+  }
+});
+
+
+/* ----------------------- monitoring loop ----------------------- */
+// Improved monitoring with parallel processing and error handling
+async function runMonitoringCycle() {
   try {
     const sites = await getAllSites();
-    for (const site of sites) {
-      await checkSite(site);
+    if (sites.length === 0) {
+      console.log("📊 No sites to monitor");
+      return;
     }
-  } catch (e) {
-    console.error("sweep error:", e);
+
+    console.log(`🔄 Starting monitoring cycle for ${sites.length} sites`);
+    const startTime = Date.now();
+
+    // Process all sites in parallel with individual error handling
+    const results = await Promise.allSettled(
+      sites.map(async (site) => {
+        try {
+          const result = await checkSite(site);
+          return { site: site.url, status: result.status, success: true };
+        } catch (error) {
+          console.error(`❌ Failed to check ${site.url}:`, error.message);
+          return { site: site.url, error: error.message, success: false };
+        }
+      })
+    );
+
+    // Log summary
+    const successful = results.filter(r => r.status === 'fulfilled' && r.value.success).length;
+    const failed = results.length - successful;
+    const duration = Date.now() - startTime;
+
+    console.log(`✅ Monitoring cycle complete: ${successful} successful, ${failed} failed (${duration}ms)`);
+    
+    // Log any failures for debugging
+    results.forEach(result => {
+      if (result.status === 'rejected') {
+        console.error(`❌ Promise rejected:`, result.reason);
+      } else if (result.value && !result.value.success) {
+        console.error(`❌ Site check failed:`, result.value);
+      }
+    });
+
+  } catch (error) {
+    console.error("💥 Critical monitoring error:", error);
   }
-}, 60_000);
+}
+
+// Run monitoring every 2 minutes (120,000ms)
+setInterval(runMonitoringCycle, 120_000);
+
+// Run initial cycle after 5 seconds to let server start up
+setTimeout(runMonitoringCycle, 5000);
 
 /* ----------------------- start ----------------------- */
 app.listen(PORT, () => {
