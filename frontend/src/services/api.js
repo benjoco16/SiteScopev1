@@ -143,3 +143,18 @@ export async function api(path, opts = {}) {
   }
   return await res.json().catch(() => ({}));
 }
+
+// --- Profile ---
+export async function getProfile() {
+  const res = await fetch(`${BASE}/auth/me`, { headers: authHeaders() });
+  return res.json();
+}
+
+export async function updateProfile(data) {
+  const res = await fetch(`${BASE}/auth/update`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(data),
+  });
+  return res.json();
+}

@@ -7,6 +7,8 @@ import Login from "./pages/Login";
 import Register from "./pages/Register";
 import ForgotPassword from "./pages/ForgotPassword";
 import ResetPassword from "./pages/ResetPassword";
+import ProfilePage from "./pages/ProfilePage";      // ✅ added
+import EditProfilePage from "./pages/EditProfilePage"; 
 import MonitorForm from "./components/MonitorForm";
 import MonitorList from "./components/MonitorList";
 import { useEffect, useState } from "react";
@@ -46,6 +48,12 @@ function Dashboard() {
       <div className="flex justify-between items-center mb-4">
         <h1 className="text-2xl">SiteScope</h1>
         <button
+            onClick={() => navigate("/profile")}
+            className="px-3 py-1 border rounded"
+          >
+            Profile
+          </button>
+        <button
           onClick={handleLogout}
           className="bg-red-500 px-3 py-1 rounded hover:bg-red-600"
         >
@@ -84,6 +92,22 @@ export default function App() {
               </ProtectedRoute>
             }
           />
+           <Route
+              path="/profile"
+              element={
+                <ProtectedRoute>
+                  <ProfilePage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/edit-profile"
+              element={
+                <ProtectedRoute>
+                  <EditProfilePage />
+                </ProtectedRoute>
+              }
+            />
         </Routes>
       </BrowserRouter>
     </AuthProvider>

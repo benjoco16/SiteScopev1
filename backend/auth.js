@@ -11,6 +11,28 @@ export function signToken(user) {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: "7d" });
 }
 
+// --- Verify user ---
+export async function verifyUser(token) {
+  try {
+    return jwt.verify(token, JWT_SECRET);
+  } catch {
+    return null;
+  }
+}
+
+// --- Middleware ---
+export async function authMiddleware(req, res, next) {
+  const auth = req.headers.authorization;
+  if (!auth) return res.status(401).json({ ok: false, error: "Missing token" });
+
+  const token = auth.split(" ")[1];
+  const decoded = await verifyUser(token);
+  if (!decoded) return res.status(401).json({ ok: false, error: "Invalid token" });
+
+  req.user = decoded;
+  next();
+}
+
 /** Express middleware to require Bearer token */
 export function requireAuth(req, res, next) {
   const hdr = req.headers.authorization || "";
@@ -42,7 +64,7 @@ export async function createUser(email, password) {
 }
 
 /** verify env-admin OR DB user */
-export async function verifyUser(email, password) {
+export async function verifyCredentials(email, password) {
   // Env admin (MVP backdoor)
   if (process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD) {
     if (email === process.env.ADMIN_EMAIL && password === process.env.ADMIN_PASSWORD) {
@@ -65,4 +87,17 @@ export async function verifyUser(email, password) {
   const ok = await bcrypt.compare(password, u.password_hash || "");
   if (!ok) return null;
   return { id: u.id, email: u.email };
+}
+
+// Get current user profile
+export async function getProfile(req, res) {
+  try {
+    const { rows } = await q(
+      "SELECT id, email, username, image_url, plan, contact_number FROM users WHERE id=$1",
+      [req.user.id]
+    );
+    res.json({ ok: true, data: rows[0] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: "Profile fetch failed" });
+  }
 }

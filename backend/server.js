@@ -8,12 +8,18 @@ import crypto from "crypto";
 import { q } from "./db.js";
 import bcrypt from "bcrypt";
 import { requireAuth, signToken, verifyUser, createUser } from "./auth.js";
+import authRoutes from "./routes/auth.js";
+import profileRoutes from "./routes/profile.js";
 
 const app = express();
 const PORT = process.env.PORT || 4000;
 
 app.use(cors());
 app.use(express.json());
+
+// Route groups
+app.use("/auth", authRoutes);
+app.use("/auth", profileRoutes); // keep profile under /auth
 
 /* ----------------------- response helpers ----------------------- */
 const apiOk  = (data) => ({ ok: true,  data, error: null });
