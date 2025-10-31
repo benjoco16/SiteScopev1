@@ -30,9 +30,7 @@ sitescope/
 
 ## 🛠 Development Flow  
 
-### 1. **Start Small**  
-- Don’t ask ChatGPT for the whole app at once.  
-- Instead, build **one feature per chat** (e.g., backend ping, frontend form, email alert).  
+### 1. Start with Prototyping
 
 ---
 
