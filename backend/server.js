@@ -9,6 +9,8 @@ import { q } from "./db.js";
 import bcrypt from "bcrypt";
 import { requireAuth, signToken, verifyUser, createUser } from "./auth.js";
 
+import { makeRegisterHandler } from "./register.js";
+
 const app = express();
 const PORT = process.env.PORT || 4000;
 
@@ -384,20 +386,7 @@ app.listen(PORT, () => {
   console.log(`🚀 Backend running on http://localhost:${PORT}`);
 });
 
-app.post("/auth/register", async (req, res) => {
-  try {
-    const { email, password } = req.body || {};
-    if (!email || !password) {
-      return res.status(400).json({ ok: false, error: "email_and_password_required" });
-    }
-    const user = await createUser(email, password); // always returns a row
-    const token = signToken({ id: user.id, email: user.email });
-    return res.json({ ok: true, data: { token, user: { id: user.id, email: user.email } } });
-  } catch (e) {
-    console.error("register_failed", e);
-    return res.status(500).json({ ok: false, error: "register_failed" });
-  }
-});
+app.post("/auth/register", makeRegisterHandler({ createUser, signToken }));
 
 // REPLACE the whole handler with this
 app.get("/sites/:id/logs", requireAuth, async (req, res) => {

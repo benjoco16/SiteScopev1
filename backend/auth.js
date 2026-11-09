@@ -34,10 +34,15 @@ export async function createUser(email, password) {
   const up = await q(
     `INSERT INTO users(email, password_hash)
        VALUES ($1, $2)
-     ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
+     ON CONFLICT (email) DO NOTHING
      RETURNING id, email`,
     [email, hash]
   );
+  if (!up.rows.length) {
+    const error = new Error("Registration could not be completed");
+    error.code = "REGISTRATION_CONFLICT";
+    throw error;
+  }
   return up.rows[0];
 }
 
